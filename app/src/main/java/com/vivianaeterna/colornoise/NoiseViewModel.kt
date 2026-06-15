@@ -1,4 +1,4 @@
-package com.vivianaeterna.colornoise
+package com.vivianaeterna.colornoise // <-- CHANGE THIS
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
@@ -7,12 +7,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 
-// Data class for a preset
+// Preset now holds a list of 10 band values instead of a NoiseType enum
 data class Preset(
     val name: String,
-    val noiseType: AudioEngine.NoiseType,
-    val volume: Float,
-    val tone: Float
+    val bands: List<Float>
 )
 
 class NoiseViewModel(application: Application) : AndroidViewModel(application) {
@@ -22,23 +20,20 @@ class NoiseViewModel(application: Application) : AndroidViewModel(application) {
     // --- UI State ---
     private val _isPlaying = MutableStateFlow(false)
     private val _volume = MutableStateFlow(0.5f)
-    private val _noiseType = MutableStateFlow(AudioEngine.NoiseType.WHITE)
-    private val _tone = MutableStateFlow(0.8f) // Default to bright
+    private val _bands = MutableStateFlow(List(10) { 1.0f }) // Default to 1.0 (White Noise flat line)
     private val _savedPresets = MutableStateFlow<List<Preset>>(emptyList())
     private val _showSaveDialog = MutableStateFlow(false)
 
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
     val volume: StateFlow<Float> = _volume.asStateFlow()
-    val noiseType: StateFlow<AudioEngine.NoiseType> = _noiseType.asStateFlow()
-    val tone: StateFlow<Float> = _tone.asStateFlow()
+    val bands: StateFlow<List<Float>> = _bands.asStateFlow()
     val savedPresets: StateFlow<List<Preset>> = _savedPresets.asStateFlow()
     val showSaveDialog: StateFlow<Boolean> = _showSaveDialog.asStateFlow()
 
-    // SharedPreferences for saving presets
     private val prefs = application.getSharedPreferences("NoisePresets", 0)
 
     init {
-        loadPresets() // Load saved presets when app starts
+        loadPresets()
     }
 
     fun togglePlayback() {
@@ -48,7 +43,7 @@ class NoiseViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             audioEngine.play()
             audioEngine.setVolume(_volume.value)
-            audioEngine.setTone(_tone.value)
+            audioEngine.updateBands(_bands.value) // Push current bands to engine
             _isPlaying.value = true
         }
     }
@@ -58,23 +53,26 @@ class NoiseViewModel(application: Application) : AndroidViewModel(application) {
         audioEngine.setVolume(newVolume)
     }
 
-    fun updateNoiseType(newType: AudioEngine.NoiseType) {
-        _noiseType.value = newType
-        audioEngine.setNoiseType(newType)
+    // Called when a single slider is moved
+    fun updateBand(index: Int, value: Float) {
+        val currentBands = _bands.value.toMutableList()
+        currentBands[index] = value
+        _bands.value = currentBands
+        audioEngine.updateBands(_bands.value)
     }
 
-    fun updateTone(newTone: Float) {
-        _tone.value = newTone
-        audioEngine.setTone(newTone)
+    // Called when a Color Preset Chip is clicked
+    fun applyColorPreset(presetBands: List<Float>) {
+        _bands.value = presetBands
+        audioEngine.updateBands(_bands.value)
     }
 
     // --- Preset Logic ---
-
     fun showSaveDialog() { _showSaveDialog.value = true }
     fun hideSaveDialog() { _showSaveDialog.value = false }
 
     fun saveCurrentPreset(name: String) {
-        val newPreset = Preset(name, _noiseType.value, _volume.value, _tone.value)
+        val newPreset = Preset(name, _bands.value)
         val currentList = _savedPresets.value.toMutableList()
         currentList.add(newPreset)
         _savedPresets.value = currentList
@@ -83,9 +81,8 @@ class NoiseViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadPreset(preset: Preset) {
-        updateNoiseType(preset.noiseType)
-        updateVolume(preset.volume)
-        updateTone(preset.tone)
+        applyColorPreset(preset.bands)
+        // Approximate volume based on average of bands (optional, or just keep current volume)
     }
 
     fun deletePreset(preset: Preset) {
@@ -95,11 +92,12 @@ class NoiseViewModel(application: Application) : AndroidViewModel(application) {
         savePresetsToDisk()
     }
 
-    // Simple JSON serialization to save lists without a database
     private fun savePresetsToDisk() {
         val jsonArray = JSONArray()
         for (p in _savedPresets.value) {
-            val json = JSONArray().put(p.name).put(p.noiseType.name).put(p.volume).put(p.tone)
+            val jsonBands = JSONArray()
+            p.bands.forEach { jsonBands.put(it.toDouble()) } // JSON puts doubles
+            val json = JSONArray().put(p.name).put(jsonBands)
             jsonArray.put(json)
         }
         prefs.edit().putString("presets_json", jsonArray.toString()).apply()
@@ -111,12 +109,13 @@ class NoiseViewModel(application: Application) : AndroidViewModel(application) {
         val list = mutableListOf<Preset>()
         for (i in 0 until jsonArray.length()) {
             val inner = jsonArray.getJSONArray(i)
-            list.add(Preset(
-                inner.getString(0),
-                AudioEngine.NoiseType.valueOf(inner.getString(1)),
-                inner.getDouble(2).toFloat(),
-                inner.getDouble(3).toFloat()
-            ))
+            val name = inner.getString(0)
+            val jsonBands = inner.getJSONArray(1)
+            val bands = mutableListOf<Float>()
+            for (j in 0 until jsonBands.length()) {
+                bands.add(jsonBands.getDouble(j).toFloat())
+            }
+            list.add(Preset(name, bands))
         }
         _savedPresets.value = list
     }

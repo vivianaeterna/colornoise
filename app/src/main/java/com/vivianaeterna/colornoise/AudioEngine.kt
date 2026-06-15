@@ -4,6 +4,8 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import kotlinx.coroutines.*
+import kotlin.math.exp
+import kotlin.math.PI
 
 class AudioEngine {
 
@@ -16,29 +18,22 @@ class AudioEngine {
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var playJob: Job? = null
 
-    private var currentNoiseType: NoiseType = NoiseType.WHITE
     private var currentVolume: Float = 0.5f
-    private var currentTone: Float = 0.8f // 0.0 = Rumbly/Filtered, 1.0 = Bright/Raw
+    private var currentBands = FloatArray(10) { 1.0f }
 
-    // Algorithm states
-    private var brownLastOut: Double = 0.0
-    private var pinkB0: Double = 0.0
-    private var pinkB1: Double = 0.0
-    private var pinkB2: Double = 0.0
-    private var pinkB3: Double = 0.0
+    // Crossover filter state
+    private val filterState = DoubleArray(10) { 0.0 }
 
-    // For Blue/Violet (high-pass), we need the previous raw white noise samples
-    private var prevWhite: Double = 0.0
-    private var prevPrevWhite: Double = 0.0
+    // The 10 frequency cutoffs (Left/Deep Bass to Right/High Treble)
+    private val cutoffFreqs = doubleArrayOf(
+        60.0, 150.0, 350.0, 800.0, 1500.0, 3000.0, 5500.0, 9000.0, 14000.0, 18000.0
+    )
 
-    // For the Tone slider (simple low-pass filter state)
-    private var toneLastOut: Double = 0.0
-
-    enum class NoiseType { WHITE, PINK, BROWN, BLUE, VIOLET, GREEN, GREY }
+    private val filterCoeffs = cutoffFreqs.map { 1.0 - exp(-2.0 * PI * it / sampleRate) }
 
     fun play() {
         if (playJob?.isActive == true) return
-        resetAlgorithmState()
+        resetFilters()
 
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
@@ -52,7 +47,7 @@ class AudioEngine {
         playJob = engineScope.launch {
             val buffer = ShortArray(bufferSize)
             while (isActive) {
-                generateNoiseBuffer(buffer)
+                generateEqualizedNoise(buffer)
                 audioTrack?.write(buffer, 0, buffer.size)
             }
         }
@@ -70,88 +65,47 @@ class AudioEngine {
         audioTrack?.setVolume(volume)
     }
 
-    fun setNoiseType(type: NoiseType) {
-        currentNoiseType = type
-        resetAlgorithmState()
+    fun updateBands(bands: List<Float>) {
+        if (bands.size == 10) {
+            currentBands = bands.toFloatArray()
+        }
     }
 
-    // Tone: 0.0f (Deep) to 1.0f (Bright)
-    fun setTone(tone: Float) {
-        currentTone = tone
-    }
-
-    private fun generateNoiseBuffer(buffer: ShortArray) {
+    private fun generateEqualizedNoise(buffer: ShortArray) {
         val maxAmp = Short.MAX_VALUE.toDouble()
 
         for (i in buffer.indices) {
             val white = (Math.random() * 2.0 - 1.0)
+            var output = 0.0
+            var previous_lp = 0.0
 
-            // 1. Generate the raw base noise color
-            val baseSample: Double = when (currentNoiseType) {
-                NoiseType.WHITE -> white
+            // --- NEW CORRECTED CROSSOVER LOGIC ---
+            for (band in 0 until 9) {
+                // Apply low-pass filter to the raw white noise
+                filterState[band] += filterCoeffs[band] * (white - filterState[band])
+                val current_lp = filterState[band]
 
-                NoiseType.BROWN -> {
-                    brownLastOut = (brownLastOut + (0.02 * white)) / 1.02
-                    brownLastOut * 20.0
-                }
+                // The slice for this band is the difference between the current low-pass and the previous one
+                // Band 0: 0-60Hz. Band 1: 60-150Hz, etc.
+                val bandSlice = current_lp - previous_lp
 
-                NoiseType.PINK -> {
-                    pinkB0 = 0.99886 * pinkB0 + white * 0.0555179
-                    pinkB1 = 0.99332 * pinkB1 + white * 0.0750759
-                    pinkB2 = 0.96900 * pinkB2 + white * 0.1538520
-                    pinkB3 = 0.86650 * pinkB3 + white * 0.3104856
-                    (pinkB0 + pinkB1 + pinkB2 + pinkB3 + white * 0.5362) * 0.11
-                }
+                // Scale by the slider value and add to output
+                output += bandSlice * currentBands[band]
 
-                // Blue: High-pass filtered white (differentiate white)
-                NoiseType.BLUE -> {
-                    val blue = white - prevWhite
-                    prevWhite = white
-                    blue * 2.0 // Boost volume
-                }
-
-                // Violet: Even heavier high-pass (differentiate twice)
-                NoiseType.VIOLET -> {
-                    val violet = white - 2 * prevWhite + prevPrevWhite
-                    prevPrevWhite = prevWhite
-                    prevWhite = white
-                    violet * 4.0 // Boost volume heavily
-                }
-
-                // Green: Mid-frequency heavy (simplified bandpass approximation)
-                NoiseType.GREEN -> {
-                    val pinkish = (pinkB0 + pinkB1 + pinkB2 + pinkB3 + white * 0.5362) * 0.11
-                    pinkB0 = 0.99886 * pinkB0 + white * 0.0555179
-                    pinkB1 = 0.99332 * pinkB1 + white * 0.0750759
-                    pinkB2 = 0.96900 * pinkB2 + white * 0.1538520
-                    pinkB3 = 0.86650 * pinkB3 + white * 0.3104856
-                    pinkish * 1.5
-                }
-
-                // Grey: Psychoacoustic equal loudness (approximation: slightly filtered white)
-                NoiseType.GREY -> {
-                    brownLastOut = (brownLastOut + (0.005 * white)) / 1.005
-                    (white * 0.7) + (brownLastOut * 0.3)
-                }
+                // Pass the current low-pass to the next band
+                previous_lp = current_lp
             }
 
-            // 2. Apply the Tone Slider (Low-Pass Filter)
-            // toneCutoff goes from 0.01 (muffled) to near 1.0 (passes everything)
-            val toneCutoff = 0.01 + (currentTone * 0.98)
+            // The 10th band (highest frequencies) is whatever is left over from the raw white noise
+            val bandSlice9 = white - previous_lp
+            output += bandSlice9 * currentBands[9]
 
-            // Simple 1-pole low-pass filter math
-            toneLastOut = toneLastOut + (toneCutoff * (baseSample - toneLastOut))
-
-            val finalSample = toneLastOut
-
-            // 3. Convert to 16-bit audio
-            buffer[i] = (finalSample * maxAmp).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+            buffer[i] = (output * maxAmp).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
         }
     }
 
-    private fun resetAlgorithmState() {
-        brownLastOut = 0.0; pinkB0 = 0.0; pinkB1 = 0.0; pinkB2 = 0.0; pinkB3 = 0.0
-        prevWhite = 0.0; prevPrevWhite = 0.0; toneLastOut = 0.0
+    private fun resetFilters() {
+        filterState.fill(0.0)
     }
 
     fun release() {
