@@ -1,8 +1,14 @@
 package com.vivianaeterna.colornoise // <-- CHANGE THIS
 
+import android.Manifest
+import android.content.Intent
+import androidx.compose.ui.unit.Constraints
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -13,16 +19,42 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+
+object ColorPresets {
+    val White = List(10) { 0.5f }
+    val Pink = listOf(1.0f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f)
+    val Brown = listOf(1.0f, 1.0f, 0.8f, 0.6f, 0.4f, 0.3f, 0.2f, 0.15f, 0.1f, 0.05f)
+    val Blue = listOf(0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f)
+    val Violet = listOf(0.05f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.6f, 0.8f, 1.0f, 1.0f)
+    val Green = listOf(0.15f, 0.4f, 0.8f, 1.0f, 1.0f, 0.8f, 0.4f, 0.15f, 0.1f, 0.05f)
+    val Grey = listOf(0.85f, 0.65f, 0.35f, 0.15f, 0.1f, 0.15f, 0.35f, 0.65f, 0.85f, 0.85f)
+
+    // Helper for the Notification Service to find bands by name
+    fun getBandsByName(name: String): List<Float> {
+        return when(name) {
+            "Pink" -> Pink; "Brown" -> Brown; "Blue" -> Blue
+            "Violet" -> Violet; "Green" -> Green; "Grey" -> Grey
+            else -> White
+        }
+    }
+}
+
+data class Preset(val name: String, val bands: List<Float>)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            // Dark Mode Sync!
+            val darkTheme = isSystemInDarkTheme()
+            MaterialTheme(
+                colorScheme = if (darkTheme) darkColorScheme() else lightColorScheme()
+            ) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     NoiseApp()
                 }
@@ -31,36 +63,26 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-object ColorPresets {
-    // Flat: Target energy sum = 5.0 (0.5 * 10 bands)
-    val White = List(10) { 0.5f }
-
-    // -3dB / octave: Gradual steady drop (Sum ≈ 5.5)
-    val Pink = listOf(1.0f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f)
-
-    // -6dB / octave: Sharp drop, but boosted in the lows to maintain volume (Sum ≈ 5.6)
-    val Brown = listOf(1.0f, 1.0f, 0.8f, 0.6f, 0.4f, 0.3f, 0.2f, 0.15f, 0.1f, 0.05f)
-
-    // +3dB / octave: Inverse of Pink (Sum ≈ 5.5)
-    val Blue = listOf(0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f)
-
-    // +6dB / octave: Inverse of Brown (Sum ≈ 5.6)
-    val Violet = listOf(0.05f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.6f, 0.8f, 1.0f, 1.0f)
-
-    // Mid-frequency bell curve (Sum ≈ 4.85)
-    val Green = listOf(0.15f, 0.4f, 0.8f, 1.0f, 1.0f, 0.8f, 0.4f, 0.15f, 0.1f, 0.05f)
-
-    // Equal loudness contour: Dips where the ear is sensitive (mids), boosts lows/highs (Sum ≈ 4.95)
-    val Grey = listOf(0.85f, 0.65f, 0.35f, 0.15f, 0.1f, 0.15f, 0.35f, 0.65f, 0.85f, 0.85f)
-}
-
 @Composable
 fun NoiseApp(viewModel: NoiseViewModel = viewModel()) {
-    val isPlaying by viewModel.isPlaying.collectAsState()
+    val context = LocalContext.current
+
+    val isPlaying by NoiseAppState.isPlaying.collectAsState()
     val volume by viewModel.volume.collectAsState()
     val bands by viewModel.bands.collectAsState()
     val savedPresets by viewModel.savedPresets.collectAsState()
     val showSaveDialog by viewModel.showSaveDialog.collectAsState()
+    val currentPresetName by NoiseAppState.currentPresetName.collectAsState()
+
+    // --- Notification Permission Request (Android 13+) ---
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            // Permission granted, safe to start service
+            context.startService(Intent(context, NoiseService::class.java))
+        }
+    }
 
     if (showSaveDialog) {
         SavePresetDialog(
@@ -89,7 +111,10 @@ fun NoiseApp(viewModel: NoiseViewModel = viewModel()) {
             )
             colorMap.forEach { (name, preset) ->
                 OutlinedButton(
-                    onClick = { viewModel.applyColorPreset(preset) },
+                    onClick = { viewModel.applyColorPreset(name, preset) },
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (currentPresetName == name) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
+                    ),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                 ) {
                     Text(name, style = MaterialTheme.typography.labelMedium)
@@ -106,19 +131,18 @@ fun NoiseApp(viewModel: NoiseViewModel = viewModel()) {
             Color.Blue, Color(0xFF8A2BE2)
         )
 
-        // 0.3f takes up 30% of the screen height
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.3f), // <--- Your 0.3f request
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.3f),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
             bands.forEachIndexed { index, value ->
                 VerticalSlider(
                     value = value,
-                    onValueChange = { viewModel.updateBand(index, it) },
+                    onValueChange = {
+                        viewModel.updateBand(index, it)
+                        NoiseAppState.setPresetName("Custom") // Mark as custom if user touches slider
+                    },
                     color = bandColors[index],
-                    // weight(1f) spaces them evenly, fillMaxHeight() stretches them to the Row
                     modifier = Modifier.weight(1f).fillMaxHeight()
                 )
             }
@@ -140,7 +164,9 @@ fun NoiseApp(viewModel: NoiseViewModel = viewModel()) {
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
             Button(
-                onClick = { viewModel.togglePlayback() },
+                onClick = {
+                    viewModel.togglePlayback(context, notificationPermissionLauncher)
+                },
                 modifier = Modifier.weight(1f).height(50.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = if (isPlaying) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
             ) { Text(if (isPlaying) "STOP" else "PLAY") }
@@ -166,11 +192,6 @@ fun NoiseApp(viewModel: NoiseViewModel = viewModel()) {
     }
 }
 
-/**
- * A properly constrained Vertical Slider.
- * Uses Modifier.layout to swap width/height constraints so the slider
- * actually stretches to fill its parent's height.
- */
 @Composable
 fun VerticalSlider(value: Float, onValueChange: (Float) -> Unit, color: Color, modifier: Modifier = Modifier) {
     Slider(
@@ -178,33 +199,18 @@ fun VerticalSlider(value: Float, onValueChange: (Float) -> Unit, color: Color, m
         onValueChange = onValueChange,
         modifier = modifier
             .layout { measurable, constraints ->
-                // 1. Swap the width and height constraints
                 val swappedConstraints = Constraints(
-                    minWidth = constraints.minHeight,
-                    maxWidth = constraints.maxHeight, // Row's height becomes Slider's max width!
-                    minHeight = constraints.minWidth,
-                    maxHeight = constraints.maxWidth
+                    minWidth = constraints.minHeight, maxWidth = constraints.maxHeight,
+                    minHeight = constraints.minWidth, maxHeight = constraints.maxWidth
                 )
-
-                // 2. Measure the slider with the swapped constraints
                 val placeable = measurable.measure(swappedConstraints)
-
-                // 3. Report the swapped dimensions back to the parent layout
                 layout(placeable.height, placeable.width) {
-                    // 4. Center the horizontal slider inside the vertical box
-                    placeable.place(
-                        x = -(placeable.width - placeable.height) / 2,
-                        y = (placeable.width - placeable.height) / 2
-                    )
+                    placeable.place(x = -(placeable.width - placeable.height) / 2, y = (placeable.width - placeable.height) / 2)
                 }
             }
-            .graphicsLayer {
-                // 5. Finally, rotate the visual drawing
-                rotationZ = -90f
-            },
+            .graphicsLayer { rotationZ = -90f },
         colors = SliderDefaults.colors(
-            thumbColor = color,
-            activeTrackColor = color.copy(alpha = 0.8f),
+            thumbColor = color, activeTrackColor = color.copy(alpha = 0.8f),
             inactiveTrackColor = color.copy(alpha = 0.2f)
         )
     )

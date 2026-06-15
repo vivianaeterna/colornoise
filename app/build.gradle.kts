@@ -13,7 +13,7 @@ android {
 
     defaultConfig {
         applicationId = "com.vivianaeterna.colornoise"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
@@ -54,4 +54,5 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.media)
 }

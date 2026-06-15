@@ -4,11 +4,24 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.exp
 import kotlin.math.PI
 
-class AudioEngine {
+// Central State shared between UI and Notification Service
+object NoiseAppState {
+    private val _isPlaying = MutableStateFlow(false)
+    private val _currentPresetName = MutableStateFlow("White")
+    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
+    val currentPresetName: StateFlow<String> = _currentPresetName.asStateFlow()
 
+    fun setPlaying(playing: Boolean) { _isPlaying.value = playing }
+    fun setPresetName(name: String) { _currentPresetName.value = name }
+}
+
+object AudioEngine {
     private val sampleRate = 44100
     private val channelConfig = AudioFormat.CHANNEL_OUT_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
@@ -18,17 +31,11 @@ class AudioEngine {
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var playJob: Job? = null
 
-    private var currentVolume: Float = 0.5f
-    private var currentBands = FloatArray(10) { 1.0f }
+    @Volatile private var currentBands = FloatArray(10) { 0.5f }
+    @Volatile private var currentVolume: Float = 0.5f
 
-    // Crossover filter state
     private val filterState = DoubleArray(10) { 0.0 }
-
-    // The 10 frequency cutoffs (Left/Deep Bass to Right/High Treble)
-    private val cutoffFreqs = doubleArrayOf(
-        60.0, 150.0, 350.0, 800.0, 1500.0, 3000.0, 5500.0, 9000.0, 14000.0, 18000.0
-    )
-
+    private val cutoffFreqs = doubleArrayOf(60.0, 150.0, 350.0, 800.0, 1500.0, 3000.0, 5500.0, 9000.0, 14000.0, 18000.0)
     private val filterCoeffs = cutoffFreqs.map { 1.0 - exp(-2.0 * PI * it / sampleRate) }
 
     fun play() {
@@ -51,6 +58,7 @@ class AudioEngine {
                 audioTrack?.write(buffer, 0, buffer.size)
             }
         }
+        NoiseAppState.setPlaying(true)
     }
 
     fun stop() {
@@ -58,6 +66,7 @@ class AudioEngine {
         audioTrack?.stop()
         audioTrack?.release()
         audioTrack = null
+        NoiseAppState.setPlaying(false)
     }
 
     fun setVolume(volume: Float) {
@@ -66,37 +75,23 @@ class AudioEngine {
     }
 
     fun updateBands(bands: List<Float>) {
-        if (bands.size == 10) {
-            currentBands = bands.toFloatArray()
-        }
+        if (bands.size == 10) currentBands = bands.toFloatArray()
     }
 
     private fun generateEqualizedNoise(buffer: ShortArray) {
         val maxAmp = Short.MAX_VALUE.toDouble()
-
         for (i in buffer.indices) {
             val white = (Math.random() * 2.0 - 1.0)
             var output = 0.0
             var previous_lp = 0.0
 
-            // --- NEW CORRECTED CROSSOVER LOGIC ---
             for (band in 0 until 9) {
-                // Apply low-pass filter to the raw white noise
                 filterState[band] += filterCoeffs[band] * (white - filterState[band])
                 val current_lp = filterState[band]
-
-                // The slice for this band is the difference between the current low-pass and the previous one
-                // Band 0: 0-60Hz. Band 1: 60-150Hz, etc.
                 val bandSlice = current_lp - previous_lp
-
-                // Scale by the slider value and add to output
                 output += bandSlice * currentBands[band]
-
-                // Pass the current low-pass to the next band
                 previous_lp = current_lp
             }
-
-            // The 10th band (highest frequencies) is whatever is left over from the raw white noise
             val bandSlice9 = white - previous_lp
             output += bandSlice9 * currentBands[9]
 
@@ -104,12 +99,6 @@ class AudioEngine {
         }
     }
 
-    private fun resetFilters() {
-        filterState.fill(0.0)
-    }
-
-    fun release() {
-        stop()
-        engineScope.cancel()
-    }
+    private fun resetFilters() { filterState.fill(0.0) }
+    fun release() { stop() }
 }
